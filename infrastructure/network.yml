@@ -30,7 +30,7 @@ Parameters:
     ConstraintDescription: Invalid CIDR Bits
   OfficeIp:
     Type: String
-    Default: "103.104.16.78/32"
+    Default: "179.162.2.168/32"
     AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
   Changelog:
     Type: String
