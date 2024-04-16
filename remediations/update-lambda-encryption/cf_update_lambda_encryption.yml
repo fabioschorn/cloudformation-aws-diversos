@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy S3 bucket, IAM Role, and Lambda function for updating Lambda encryption settings.
+
+Resources:
+  LambdaARNsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: lambda-arns-bucket
+
+  LambdaKMSUpdaterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaKMSUpdaterRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaKMSUpdaterPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::lambda-arns-bucket/*'
+              - Effect: Allow
+                Action:
+                  - lambda:ListFunctions
+                  - lambda:GetFunctionConfiguration
+                  - lambda:UpdateFunctionConfiguration
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                Resource: '*'  # This should be restricted to the specific CMKs in use
+
+  EncryptionUpdaterLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: UpdateLambdaEncryption
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Code:
+        ZipFile: |
+          import boto3
+          import csv
+          from io import StringIO
+
+          def lambda_handler(event, context):
+              # Define the bucket and key
+              bucket_name = 'lambda-arns-bucket'
+              filename = 'list_ch_lambdas.csv'
+
+              # Define the CMK ARN to use for encryption
+              cmk_arn_alias = 'arn:aws:kms:us-region:account:alias/your-cmk-alias'
+
+              # Create an S3 client
+              s3 = boto3.client('s3')
+
+              # Get the CSV file from the S3 bucket
+              response = s3.get_object(Bucket=bucket_name, Key=filename)
+              csv_data = response['Body'].read().decode('utf-8')
+
+              # Parse the CSV data
+              csv_file = StringIO(csv_data)
+              csv_reader = csv.reader(csv_file)
+              next(csv_reader)  # Skip the header row
+
+              # Create a Lambda client
+              lambda_client = boto3.client('lambda')
+
+              # Update the encryption settings of Environment Variables for each Lambda function
+              for row in csv_reader:
+                  function_name = row[0]
+                  environment_variables = row[1]
+
+                  # Update the encryption settings of the Environment Variables
+                  response = lambda_client.update_function_configuration(
+                      FunctionName=function_name,
+                      Environment={
+                          'Variables': environment_variables
+                      },
+                      KMSKeyArn=cmk_arn_alias
+                  )
+                  print(f"Updated the encryption settings for Lambda function: {function_name}")
+
+              return {
+                  'statusCode': 200,
+                  'body': 'Lambda encryption settings updated successfully'
+              }
+      Role: !GetAtt LambdaKMSUpdaterRole.Arn
+      Timeout: 10
+
+Outputs:
+  LambdaFunctionARN:
+    Description: "ARN of the Lambda Function"
+    Value: !GetAtt EncryptionUpdaterLambda.Arn
