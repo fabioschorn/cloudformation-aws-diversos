@@ -25,13 +25,21 @@ def lambda_handler(event, context):
     # Specify the alias of your CMK
     kms_key_alias = 'alias/personal_key'  # Replace 'personal_key' with your CMK alias
     
-    # Update each Lambda function's configuration to use the specified KMS key alias
+    # Update the environment variables for each Lambda function
     for arn in arns:
+        # Get the current configuration of the Lambda function
+        func_config = lambda_client.get_function_configuration(FunctionName=arn)
+        
+        # Update the function's environment variables to use the new KMS key for encryption
+        env_vars = func_config['Environment']['Variables'] if 'Environment' in func_config and 'Variables' in func_config['Environment'] else {}
         response = lambda_client.update_function_configuration(
             FunctionName=arn,
-            KMSKeyArn=kms_key_alias
+            Environment={
+                'Variables': env_vars,
+                'KMSKeyArn': kms_key_alias  # Set the KMS key for environment variable encryption
+            }
         )
-        print(f"Updated {arn} to use KMS key alias {kms_key_alias}")
+        print(f"Updated environment settings for {arn} to use KMS key alias {kms_key_alias}")
 
 # Be sure to replace 'your-bucket-name' and 'list_ch_lambdas.csv' with the actual S3 bucket and file path.
 # Also, replace 'alias/personal_key' with the actual alias of your KMS key.
