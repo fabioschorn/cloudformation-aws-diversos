@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy S3 bucket, IAM Roles, Lambda functions, SQS queue, SES, SNS, and Step Functions for managing Lambda corrections with an approval workflow.
+
+Resources:
+  LambdaARNsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: lambda-arns-bucket
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: 'list_ch_lambdas.csv'
+            Function: !GetAtt TriggerStepFunction.Arn
+
+  TriggerStepFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: TriggerStepFunction
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+
+          def lambda_handler(event, context):
+              client = boto3.client('stepfunctions')
+              response = client.start_execution(
+                  stateMachineArn='arn:aws:states:region:account-id:stateMachine:MyStateMachine'
+              )
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(response)
+              }
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+  ApprovalTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ApprovalTopic
+
+  EmailNotificationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SendApprovalRequest
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Code:
+        ZipFile: |
+          import boto3
+          def lambda_handler(event, context):
+              client = boto3.client('ses')
+              client.send_email(
+                  Source='sender@example.com',
+                  Destination={
+                      'ToAddresses': ['approver@example.com']
+                  },
+                  Message={
+                      'Subject': {'Data': 'Approval Needed for Lambda Updates'},
+                      'Body': {'Text': {'Data': 'Please approve the updates via the provided link.'}}
+                  }
+              )
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+  UpdateLambdaEncryption:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: UpdateLambdaEncryption
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Code:
+        ZipFile: |
+          import boto3
+          def lambda_handler(event, context):
+              # Lambda update logic
+              return {
+                  'statusCode': 200,
+                  'body': 'Updates applied successfully.'
+              }
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+  MyStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "A workflow to manage update approvals for Lambda functions.",
+          "StartAt": "SendApprovalRequest",
+          "States": {
+            "SendApprovalRequest": {
+              "Type": "Task",
+              "Resource": "${EmailNotificationLambda.Arn}",
+              "Next": "WaitForApproval"
+            },
+            "WaitForApproval": {
+              "Type": "Wait",
+              "Seconds": 86400,
+              "Next": "UpdateLambdaEncryption"
+            },
+            "UpdateLambdaEncryption": {
+              "Type": "Task",
+              "Resource": "${UpdateLambdaEncryption.Arn}",
+              "End": true
+            }
+          }
+        }
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [lambda.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['logs:*', 's3:*', 'sns:*', 'ses:*', 'lambda:*', 'states:*']
+                Resource: '*'
+
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [states.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Policies:
+        - PolicyName: StepFunctionsExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['lambda:InvokeFunction', 'sns:Publish', 'logs:*']
+                Resource: '*'
+
+Outputs:
+  StateMachineArn:
+    Description: "ARN of the Step Functions State Machine"
+    Value: !Ref MyStateMachine
