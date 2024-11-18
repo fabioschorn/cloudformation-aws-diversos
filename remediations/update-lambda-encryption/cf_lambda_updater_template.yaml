@@ -5,7 +5,7 @@ Resources:
   LambdaARNsBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: lambda-arns-bucket
+      BucketName: !Sub "lambda-arns-bucket-${AWS::StackName}-${AWS::Region}-${AWS::AccountId}"
 
   LambdaKMSUpdaterRole:
     Type: AWS::IAM::Role
@@ -32,7 +32,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:GetObject
-                Resource: !Sub 'arn:aws:s3:::lambda-arns-bucket/*'
+                Resource: !Sub "arn:aws:s3:::lambda-arns-bucket-${AWS::StackName}-${AWS::Region}-${AWS::AccountId}/*"
               - Effect: Allow
                 Action:
                   - lambda:ListFunctions
@@ -59,10 +59,11 @@ Resources:
           import boto3
           import csv
           from io import StringIO
+          import os
 
           def lambda_handler(event, context):
-              # Define the bucket and key
-              bucket_name = 'lambda-arns-bucket'
+              # Get the bucket name from environment variables
+              bucket_name = os.environ['BUCKET_NAME']
               filename = 'list_ch_lambdas.csv'
 
               # Define the CMK ARN to use for encryption
@@ -104,8 +105,13 @@ Resources:
               }
       Role: !GetAtt LambdaKMSUpdaterRole.Arn
       Timeout: 10
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref LambdaARNsBucket
 
 Outputs:
   LambdaFunctionARN:
     Description: "ARN of the Lambda Function"
     Value: !GetAtt EncryptionUpdaterLambda.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaFunctionARN"
