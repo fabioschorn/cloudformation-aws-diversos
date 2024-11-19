@@ -5,7 +5,8 @@ Resources:
   LambdaARNsBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "lambda-arns-bucket-${AWS::StackName}-${AWS::Region}-${AWS::AccountId}"
+    # Create S3 Bucket with a unique name, use the region, account ID
+      BucketName: !Sub "lambda-arns-bucket-${AWS::Region}-${AWS::AccountId}"
 
   LambdaKMSUpdaterRole:
     Type: AWS::IAM::Role
@@ -63,7 +64,7 @@ Resources:
 
           def lambda_handler(event, context):
               # Get the bucket name from environment variables
-              bucket_name = os.environ['BUCKET_NAME']
+              bucket_name = 'lambda-arns-bucket-${AWS::Region}-${AWS::AccountId}'
               filename = 'list_ch_lambdas.csv'
 
               # Define the CMK ARN to use for encryption
