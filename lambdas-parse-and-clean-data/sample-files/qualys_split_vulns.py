@@ -5,13 +5,13 @@ def process_qualys_csv(input_file_path, output_pci_file, output_nonpci_file):
     """
     Reads a Qualys CSV file and does the following:
     1. Skips the first 8 lines (often report headers).
-    2. Parses the CSV (semicolon delimiter).
+    2. Parses the CSV using semicolon delimiter (';').
     3. Keeps only these columns (in this order):
        IP, DNS, OS, QID, Title, Severity, CVE ID, Vendor Reference,
        Threat, Impact, Solution, PCI Vuln, Category
-    4. Writes two CSV files:
+    4. Writes two CSV files (semicolon-delimited):
        - One for rows where 'PCI Vuln' == 'yes' (case-insensitive).
-       - One for rows where 'PCI Vuln' == 'no' (or anything else).
+       - One for rows where 'PCI Vuln' != 'yes' (including 'no' or blank).
     """
 
     # Define the columns we want to keep
@@ -43,9 +43,9 @@ def process_qualys_csv(input_file_path, output_pci_file, output_nonpci_file):
         with open(output_pci_file, 'w', newline='', encoding='utf-8') as pci_out, \
              open(output_nonpci_file, 'w', newline='', encoding='utf-8') as nonpci_out:
              
-            # Create separate writers
-            pci_writer = csv.DictWriter(pci_out, fieldnames=wanted_columns)
-            nonpci_writer = csv.DictWriter(nonpci_out, fieldnames=wanted_columns)
+            # Create separate writers with semicolon delimiter
+            pci_writer = csv.DictWriter(pci_out, fieldnames=wanted_columns, delimiter=';')
+            nonpci_writer = csv.DictWriter(nonpci_out, fieldnames=wanted_columns, delimiter=';')
             
             # Write headers
             pci_writer.writeheader()
@@ -58,7 +58,7 @@ def process_qualys_csv(input_file_path, output_pci_file, output_nonpci_file):
                 for col in wanted_columns:
                     filtered_row[col] = row.get(col, '').strip()
                 
-                # Check the PCI Vuln column
+                # Check the PCI Vuln column (case-insensitive)
                 pci_value = filtered_row["PCI Vuln"].lower()
                 
                 if pci_value == "yes":
@@ -72,8 +72,8 @@ def process_qualys_csv(input_file_path, output_pci_file, output_nonpci_file):
 
 if __name__ == "__main__":
     # Example usage:
-    input_csv = "qualys_report.csv"        # The original Qualys CSV
-    output_pci_csv = "output_pci.csv"      # Rows with PCI Vuln == "yes"
+    input_csv = "qualys_report.csv"           # The original Qualys CSV (semicolon-delimited)
+    output_pci_csv = "output_pci.csv"         # Rows with PCI Vuln == "yes"
     output_nonpci_csv = "output_non-pci.csv"  # Rows with PCI Vuln != "yes"
 
     process_qualys_csv(input_csv, output_pci_csv, output_nonpci_csv)
