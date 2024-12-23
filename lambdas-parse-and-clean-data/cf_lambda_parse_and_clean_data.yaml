@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Creates an S3 bucket, an IAM role, and a Lambda function that processes
+  Qualys CSV files from the 'input-unprocessed' folder to 'output-processed'.
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: "Name of the S3 bucket to store input and output files"
+    Default: "my-qualys-bucket-example"
+
+Resources:
+  ######################################
+  # S3 Bucket
+  ######################################
+  QualysBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+
+  ######################################
+  # IAM Role for Lambda
+  ######################################
+  QualysLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "QualysCSVLambdaRole-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: QualysS3AccessPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:PutObject
+                Resource:
+                  - !Sub arn:aws:s3:::${BucketName}
+                  - !Sub arn:aws:s3:::${BucketName}/*
+
+  ######################################
+  # Lambda Function
+  ######################################
+  QualysProcessorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "QualysProcessorLambda-${AWS::StackName}"
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt QualysLambdaRole.Arn
+      Timeout: 120
+      Code:
+        ZipFile: |
+          import boto3
+          import csv
+          import io
+          import os
+          import uuid
+          from datetime import datetime
+          
+          s3 = boto3.client('s3')
+
+          def lambda_handler(event, context):
+              """
+              This Lambda is meant to be invoked manually (no triggers).
+              
+              It will:
+              1. Find all CSV files in 'input-unprocessed/' in the specified S3 Bucket.
+              2. For each CSV, parse and extract relevant columns:
+                 -> InstanceID
+                 -> QID
+                 -> Severity
+                 -> Remediation
+                 -> Status
+              3. (Example) Deduplicate by QID.
+              4. Save a processed CSV into 'output-processed/' in the same S3 bucket.
+              
+              The S3 bucket name can be passed in the event, or we can use an environment variable.
+              For this example, we'll assume the bucket name is in the event as event['bucket'].
+              """
+              
+              # 1. Get the bucket name from the event or environment variable
+              bucket_name = event.get("bucket", os.environ.get("BUCKET_NAME", None))
+              if not bucket_name:
+                  raise ValueError("S3 bucket name must be provided in the event or environment variable.")
+              
+              # 2. Find all objects in 'input-unprocessed/'
+              prefix = 'input-unprocessed/'
+              
+              response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+              if 'Contents' not in response:
+                  print(f"No objects found in prefix '{prefix}'. Exiting.")
+                  return
+
+              # We'll collect all parsed data from all CSV files in a single list
+              all_parsed_rows = []
+
+              # 3. Iterate over each file found in 'input-unprocessed/'
+              for obj in response['Contents']:
+                  key = obj['Key']
+                  if key.endswith('.csv') and key != prefix:  # ensure it's a CSV file
+                      print(f"Processing file: {key}")
+
+                      # 3.1. Download the CSV file
+                      csv_obj = s3.get_object(Bucket=bucket_name, Key=key)
+                      body = csv_obj['Body'].read().decode('utf-8')
+
+                      # 3.2. Parse the CSV
+                      reader = csv.DictReader(body.splitlines())
+                      for row in reader:
+                          # Extract the relevant columns (some CSVs might have different names)
+                          instance_id = row.get('InstanceID', '')
+                          qid = row.get('QID', '')
+                          severity = row.get('Severity', '')
+                          remediation = row.get('Remediation', '')
+                          status = row.get('Status', '')
+
+                          # Append to a list (we can add more data cleaning here if needed)
+                          all_parsed_rows.append({
+                              'InstanceID': instance_id,
+                              'QID': qid,
+                              'Severity': severity,
+                              'Remediation': remediation,
+                              'Status': status
+                          })
+
+              if not all_parsed_rows:
+                  print("No data found in CSV files. Exiting.")
+                  return
+
+              # 4. Deduplicate by QID as an example (you can do more advanced transformations)
+              #    We'll keep the first occurrence of each QID. 
+              #    In real life, you might want to group or merge data differently.
+              unique_qids = {}
+              for row in all_parsed_rows:
+                  qid = row['QID']
+                  if qid not in unique_qids:
+                      unique_qids[qid] = row
+
+              deduplicated_rows = list(unique_qids.values())
+
+              # 5. Prepare the output CSV in-memory
+              output_fieldnames = ['InstanceID','QID','Severity','Remediation','Status']
+              output_csv_buffer = io.StringIO()
+              writer = csv.DictWriter(output_csv_buffer, fieldnames=output_fieldnames)
+              writer.writeheader()
+              for row in deduplicated_rows:
+                  writer.writerow(row)
+
+              # 6. Upload the new CSV to 'output-processed/' with a timestamp or unique ID
+              timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+              output_key = f"output-processed/processed-{timestamp}-{uuid.uuid4().hex}.csv"
+              s3.put_object(
+                  Bucket=bucket_name,
+                  Key=output_key,
+                  Body=output_csv_buffer.getvalue().encode('utf-8')
+              )
+
+              print(f"Successfully saved processed CSV to s3://{bucket_name}/{output_key}")
+
+Outputs:
+  LambdaFunctionName:
+    Description: "Name of the Qualys CSV Processor Lambda function"
+    Value: !Ref QualysProcessorLambda
+
+  LambdaFunctionArn:
+    Description: "ARN of the Qualys CSV Processor Lambda function"
+    Value: !GetAtt QualysProcessorLambda.Arn
+
+  S3BucketName:
+    Description: "The S3 bucket where CSV files are stored"
+    Value: !Ref BucketName
