@@ -1,30 +1,49 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Creates an S3 bucket, an IAM role, and a Lambda function that processes
-  Qualys CSV files from the 'input-unprocessed' folder to 'output-processed'.
-
-Parameters:
-  BucketName:
-    Type: String
-    Description: "Name of the S3 bucket to store input and output files"
-    Default: "my-qualys-bucket-example"
+  Creates an S3 bucket "vm-analysis-project-poc01" with the specified folder structure,
+  plus a Lambda that processes ONLY the most recent CSV in input-unprocessed by skipping 
+  8 lines and splitting into PCI vs non-PCI. The Lambda must be invoked manually (no triggers).
 
 Resources:
-  ######################################
-  # S3 Bucket
-  ######################################
-  QualysBucket:
+  ###############################################
+  # 1) S3 Bucket
+  ###############################################
+  VMAnalysisBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Ref BucketName
+      BucketName: "vm-analysis-project-poc01"
 
-  ######################################
-  # IAM Role for Lambda
-  ######################################
-  QualysLambdaRole:
+  ###############################################
+  # 2) Create "folders" (actually empty objects)
+  ###############################################
+  InputUnprocessedFolder:
+    Type: AWS::S3::Object
+    Properties:
+      Bucket: !Ref VMAnalysisBucket
+      Key: "input-unprocessed/"
+      ContentType: "application/x-directory"
+
+  OutputProcessedPciFolder:
+    Type: AWS::S3::Object
+    Properties:
+      Bucket: !Ref VMAnalysisBucket
+      Key: "output-processed/pci/"
+      ContentType: "application/x-directory"
+
+  OutputProcessedNonPciFolder:
+    Type: AWS::S3::Object
+    Properties:
+      Bucket: !Ref VMAnalysisBucket
+      Key: "output-processed/non-pci/"
+      ContentType: "application/x-directory"
+
+  ###############################################
+  # 3) IAM Role for Lambda (with S3 read/write)
+  ###############################################
+  LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "QualysCSVLambdaRole-${AWS::StackName}"
+      RoleName: !Sub "VMAnalysisLambdaRole-${AWS::StackName}"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -37,7 +56,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: QualysS3AccessPolicy
+        - PolicyName: VMAnalysisS3Access
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -47,138 +66,168 @@ Resources:
                   - s3:ListBucket
                   - s3:PutObject
                 Resource:
-                  - !Sub arn:aws:s3:::${BucketName}
-                  - !Sub arn:aws:s3:::${BucketName}/*
+                  - !GetAtt VMAnalysisBucket.Arn
+                  - !Sub "${VMAnalysisBucket.Arn}/*"
 
-  ######################################
-  # Lambda Function
-  ######################################
-  QualysProcessorLambda:
+  ###############################################
+  # 4) Lambda Function (Python code inline)
+  ###############################################
+  VMAnalysisLambda:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub "QualysProcessorLambda-${AWS::StackName}"
+      FunctionName: !Sub "VMAnalysisLambda-${AWS::StackName}"
       Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
       Handler: index.lambda_handler
-      Role: !GetAtt QualysLambdaRole.Arn
-      Timeout: 120
+      Timeout: 300
       Code:
         ZipFile: |
           import boto3
           import csv
           import io
           import os
-          import uuid
           from datetime import datetime
-          
+          import uuid
+
           s3 = boto3.client('s3')
 
           def lambda_handler(event, context):
               """
-              This Lambda is meant to be invoked manually (no triggers).
-              
-              It will:
-              1. Find all CSV files in 'input-unprocessed/' in the specified S3 Bucket.
-              2. For each CSV, parse and extract relevant columns:
-                 -> InstanceID
-                 -> QID
-                 -> Severity
-                 -> Remediation
-                 -> Status
-              3. (Example) Deduplicate by QID.
-              4. Save a processed CSV into 'output-processed/' in the same S3 bucket.
-              
-              The S3 bucket name can be passed in the event, or we can use an environment variable.
-              For this example, we'll assume the bucket name is in the event as event['bucket'].
+              Lambda that:
+              1) Identifies the single most recent CSV file under 'input-unprocessed/' in the S3 bucket.
+              2) Skips first 8 lines
+              3) Reads the rest with semicolon (';') delimiter
+              4) Keeps columns: 
+                 [IP, DNS, OS, QID, Title, Severity, CVE ID, Vendor Reference,
+                  Threat, Impact, Solution, PCI Vuln, Category]
+              5) Splits output into 2 CSVs (semicolon-delimited):
+                 => 'PCI Vuln' == 'yes'  -> uploaded to 'output-processed/pci/'
+                 => otherwise           -> uploaded to 'output-processed/non-pci/'
+              6) No triggers; must be invoked manually (via console or CLI).
+
+              event can include:
+                {
+                  "bucket": "<bucket-name>"   [optional, default to env var or "vm-analysis-project-poc01"]
+                }
               """
-              
-              # 1. Get the bucket name from the event or environment variable
-              bucket_name = event.get("bucket", os.environ.get("BUCKET_NAME", None))
-              if not bucket_name:
-                  raise ValueError("S3 bucket name must be provided in the event or environment variable.")
-              
-              # 2. Find all objects in 'input-unprocessed/'
-              prefix = 'input-unprocessed/'
-              
+
+              # Bucket can come from event or default
+              bucket_name = event.get("bucket", os.environ.get("BUCKET_NAME", "vm-analysis-project-poc01"))
+
+              prefix = "input-unprocessed/"
               response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-              if 'Contents' not in response:
-                  print(f"No objects found in prefix '{prefix}'. Exiting.")
-                  return
+              if "Contents" not in response:
+                  print(f"No objects found at s3://{bucket_name}/{prefix}")
+                  return {"status": "No files found"}
 
-              # We'll collect all parsed data from all CSV files in a single list
-              all_parsed_rows = []
+              # 1. Identify the single MOST RECENT .csv file
+              recent_obj = None
+              for obj in response["Contents"]:
+                  key = obj["Key"]
+                  if key == prefix:  # skip the folder object
+                      continue
+                  if not key.lower().endswith(".csv"):
+                      continue
 
-              # 3. Iterate over each file found in 'input-unprocessed/'
-              for obj in response['Contents']:
-                  key = obj['Key']
-                  if key.endswith('.csv') and key != prefix:  # ensure it's a CSV file
-                      print(f"Processing file: {key}")
+                  # Compare LastModified to track the most recent
+                  if (recent_obj is None) or (obj["LastModified"] > recent_obj["LastModified"]):
+                      recent_obj = obj
 
-                      # 3.1. Download the CSV file
-                      csv_obj = s3.get_object(Bucket=bucket_name, Key=key)
-                      body = csv_obj['Body'].read().decode('utf-8')
+              if recent_obj is None:
+                  print("No CSV files found in input-unprocessed/. Exiting.")
+                  return {"status": "No CSV found"}
 
-                      # 3.2. Parse the CSV
-                      reader = csv.DictReader(body.splitlines())
-                      for row in reader:
-                          # Extract the relevant columns (some CSVs might have different names)
-                          instance_id = row.get('InstanceID', '')
-                          qid = row.get('QID', '')
-                          severity = row.get('Severity', '')
-                          remediation = row.get('Remediation', '')
-                          status = row.get('Status', '')
+              # 2. We now have the single most recent CSV
+              key = recent_obj["Key"]
+              print(f"Processing MOST RECENT CSV => s3://{bucket_name}/{key}")
 
-                          # Append to a list (we can add more data cleaning here if needed)
-                          all_parsed_rows.append({
-                              'InstanceID': instance_id,
-                              'QID': qid,
-                              'Severity': severity,
-                              'Remediation': remediation,
-                              'Status': status
-                          })
+              response = s3.get_object(Bucket=bucket_name, Key=key)
+              raw_data = response["Body"].read().decode("utf-8").splitlines()
 
-              if not all_parsed_rows:
-                  print("No data found in CSV files. Exiting.")
-                  return
+              # Skip first 8 lines
+              data_without_headers = raw_data[8:]  
 
-              # 4. Deduplicate by QID as an example (you can do more advanced transformations)
-              #    We'll keep the first occurrence of each QID. 
-              #    In real life, you might want to group or merge data differently.
-              unique_qids = {}
-              for row in all_parsed_rows:
-                  qid = row['QID']
-                  if qid not in unique_qids:
-                      unique_qids[qid] = row
+              # Prepare a CSV DictReader using semicolon delimiter
+              reader = csv.DictReader(data_without_headers, delimiter=';')
 
-              deduplicated_rows = list(unique_qids.values())
+              # Define columns we care about
+              wanted_columns = [
+                  "IP",
+                  "DNS",
+                  "OS",
+                  "QID",
+                  "Title",
+                  "Severity",
+                  "CVE ID",
+                  "Vendor Reference",
+                  "Threat",
+                  "Impact",
+                  "Solution",
+                  "PCI Vuln",
+                  "Category"
+              ]
 
-              # 5. Prepare the output CSV in-memory
-              output_fieldnames = ['InstanceID','QID','Severity','Remediation','Status']
-              output_csv_buffer = io.StringIO()
-              writer = csv.DictWriter(output_csv_buffer, fieldnames=output_fieldnames)
-              writer.writeheader()
-              for row in deduplicated_rows:
-                  writer.writerow(row)
+              # We'll write two in-memory CSV buffers
+              pci_output = io.StringIO()
+              nonpci_output = io.StringIO()
 
-              # 6. Upload the new CSV to 'output-processed/' with a timestamp or unique ID
-              timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
-              output_key = f"output-processed/processed-{timestamp}-{uuid.uuid4().hex}.csv"
+              pci_writer = csv.DictWriter(pci_output, fieldnames=wanted_columns, delimiter=';')
+              nonpci_writer = csv.DictWriter(nonpci_output, fieldnames=wanted_columns, delimiter=';')
+
+              # Write headers
+              pci_writer.writeheader()
+              nonpci_writer.writeheader()
+
+              # Process each row, pick needed columns, classify PCI or non-PCI
+              for row in reader:
+                  filtered_row = {}
+                  for col in wanted_columns:
+                      filtered_row[col] = row.get(col, "").strip()
+
+                  # Check PCI Vuln
+                  pci_value = filtered_row["PCI Vuln"].lower()
+                  if pci_value == "yes":
+                      pci_writer.writerow(filtered_row)
+                  else:
+                      nonpci_writer.writerow(filtered_row)
+
+              # Convert to bytes
+              pci_bytes = pci_output.getvalue().encode("utf-8")
+              nonpci_bytes = nonpci_output.getvalue().encode("utf-8")
+
+              # Unique file names
+              timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+              random_str = uuid.uuid4().hex[:8]
+
+              pci_output_key = f"output-processed/pci/{timestamp}-{random_str}-pci.csv"
+              nonpci_output_key = f"output-processed/non-pci/{timestamp}-{random_str}-non-pci.csv"
+
+              # Upload results
               s3.put_object(
                   Bucket=bucket_name,
-                  Key=output_key,
-                  Body=output_csv_buffer.getvalue().encode('utf-8')
+                  Key=pci_output_key,
+                  Body=pci_bytes
+              )
+              s3.put_object(
+                  Bucket=bucket_name,
+                  Key=nonpci_output_key,
+                  Body=nonpci_bytes
               )
 
-              print(f"Successfully saved processed CSV to s3://{bucket_name}/{output_key}")
+              print(f"Uploaded PCI file -> s3://{bucket_name}/{pci_output_key}")
+              print(f"Uploaded non-PCI -> s3://{bucket_name}/{nonpci_output_key}")
+
+              return {"status": "Completed processing the most recent CSV"}
 
 Outputs:
-  LambdaFunctionName:
-    Description: "Name of the Qualys CSV Processor Lambda function"
-    Value: !Ref QualysProcessorLambda
+  BucketName:
+    Description: "S3 Bucket created for VM Analysis Project"
+    Value: !Ref VMAnalysisBucket
 
-  LambdaFunctionArn:
-    Description: "ARN of the Qualys CSV Processor Lambda function"
-    Value: !GetAtt QualysProcessorLambda.Arn
+  LambdaName:
+    Description: "Name of the Lambda function"
+    Value: !Ref VMAnalysisLambda
 
-  S3BucketName:
-    Description: "The S3 bucket where CSV files are stored"
-    Value: !Ref BucketName
+  LambdaArn:
+    Description: "ARN of the Lambda function"
+    Value: !GetAtt VMAnalysisLambda.Arn
