@@ -1,68 +1,16 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Creates an S3 bucket "vm-analysis-project-poc01" with the specified folder structure,
-  plus a Lambda that processes ONLY the most recent CSV in input-unprocessed by skipping 
-  8 lines and splitting into PCI vs non-PCI. The Lambda must be invoked manually (no triggers).
+  Creates ONLY the IAM Role and the Lambda function for processing Qualys CSV.
+  Assumes an S3 bucket "vm-analysis-project-poc02" already exists with:
+    - input-unprocessed/
+    - output-processed/
+    - output-processed/pci/
+    - output-processed/non-pci/
 
 Resources:
-  ###############################################
-  # 1) S3 Bucket
-  ###############################################
-  VMAnalysisBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: "vm-analysis-project-poc03"
-
-  ###############################################
-  # 2) Create "folders" (actually empty objects)
-  ###############################################
-  InputUnprocessedFolder:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Ref VMAnalysisBucket
-      AccessControl: Private
-      Bucket: !Ref VMAnalysisBucket
-      ObjectLockEnabledForBucket: false
-      Tags:
-        - Key: Name
-          Value: "input-unprocessed/"
-
-  OutputProcessedFolder:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Ref VMAnalysisBucket
-      AccessControl: Private
-      Bucket: !Ref VMAnalysisBucket
-      ObjectLockEnabledForBucket: false
-      Tags:
-        - Key: Name
-          Value: "output-processed/"
-
-  OutputProcessedPCIFolder:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Ref VMAnalysisBucket
-      AccessControl: Private
-      Bucket: !Ref VMAnalysisBucket
-      ObjectLockEnabledForBucket: false
-      Tags:
-        - Key: Name
-          Value: "output-processed/pci/"
-
-  OutputProcessedNonPCIFolder:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Ref VMAnalysisBucket
-      AccessControl: Private
-      Bucket: !Ref VMAnalysisBucket
-      ObjectLockEnabledForBucket: false
-      Tags:
-        - Key: Name
-          Value: "output-processed/non-pci/"
-
-  ###############################################
-  # 3) IAM Role for Lambda (with S3 read/write)
-  ###############################################
+  ##########################################################
+  # 1) IAM Role for the main CSV-processing Lambda
+  ##########################################################
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -74,12 +22,11 @@ Resources:
             Principal:
               Service:
                 - lambda.amazonaws.com
-            Action:
-              - sts:AssumeRole
+            Action: "sts:AssumeRole"
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: VMAnalysisS3Access
+        - PolicyName: VMAnalysisLambdaPolicy
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -89,12 +36,18 @@ Resources:
                   - s3:ListBucket
                   - s3:PutObject
                 Resource:
-                  - !GetAtt VMAnalysisBucket.Arn
-                  - !Sub "${VMAnalysisBucket.Arn}/*"
+                # If your bucket is named differently, update below:
+                  - "arn:aws:s3:::vm-analysis-project-poc02"
+                  - "arn:aws:s3:::vm-analysis-project-poc02/input-unprocessed/*"
+                  - "arn:aws:s3:::vm-analysis-project-poc02/output-processed/pci/*"
+                  - "arn:aws:s3:::vm-analysis-project-poc02/output-processed/non-pci/*"
+                  - "arn:aws:s3:::vm-analysis-project-poc02/output-processed/pci"
+                  - "arn:aws:s3:::vm-analysis-project-poc02/output-processed/non-pci"
+                  - "arn:aws:s3:::vm-analysis-project-poc02/output-processed"
 
-  ###############################################
-  # 4) Lambda Function (Python code inline)
-  ###############################################
+  ##########################################################
+  # 2) Main Lambda Function (Processing CSV)
+  ##########################################################
   VMAnalysisLambda:
     Type: AWS::Lambda::Function
     Properties:
@@ -103,6 +56,9 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Handler: index.lambda_handler
       Timeout: 300
+      Environment:
+        Variables:
+          BUCKET_NAME: "vm-analysis-project-poc02"
       Code:
         ZipFile: |
           import boto3
@@ -120,39 +76,38 @@ Resources:
               1) Identifies the single most recent CSV file under 'input-unprocessed/' in the S3 bucket.
               2) Skips first 8 lines
               3) Reads the rest with semicolon (';') delimiter
-              4) Keeps columns: 
+              4) Keeps columns:
                  [IP, DNS, OS, QID, Title, Severity, CVE ID, Vendor Reference,
                   Threat, Impact, Solution, PCI Vuln, Category]
               5) Splits output into 2 CSVs (semicolon-delimited):
-                 => 'PCI Vuln' == 'yes'  -> uploaded to 'output-processed/pci/'
-                 => otherwise           -> uploaded to 'output-processed/non-pci/'
+                 => 'PCI Vuln' == 'yes'  -> 'output-processed/pci/'
+                 => otherwise           -> 'output-processed/non-pci/'
               6) No triggers; must be invoked manually (via console or CLI).
 
               event can include:
                 {
-                  "bucket": "<bucket-name>"   [optional, default to env var or "vm-analysis-project-poc01"]
+                  "bucket": "<bucket-name>"   [optional, default = 'vm-analysis-project-poc01']
                 }
               """
 
-              # Bucket can come from event or default
               bucket_name = event.get("bucket", os.environ.get("BUCKET_NAME", "vm-analysis-project-poc01"))
-
               prefix = "input-unprocessed/"
+
+              # List objects in the prefix
               response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
               if "Contents" not in response:
                   print(f"No objects found at s3://{bucket_name}/{prefix}")
                   return {"status": "No files found"}
 
-              # 1. Identify the single MOST RECENT .csv file
+              # Identify the single MOST RECENT .csv file
               recent_obj = None
               for obj in response["Contents"]:
                   key = obj["Key"]
-                  if key == prefix:  # skip the folder object
+                  # skip the prefix object itself or non-csv
+                  if key == prefix:
                       continue
                   if not key.lower().endswith(".csv"):
                       continue
-
-                  # Compare LastModified to track the most recent
                   if (recent_obj is None) or (obj["LastModified"] > recent_obj["LastModified"]):
                       recent_obj = obj
 
@@ -160,20 +115,20 @@ Resources:
                   print("No CSV files found in input-unprocessed/. Exiting.")
                   return {"status": "No CSV found"}
 
-              # 2. We now have the single most recent CSV
+              # Download the most recent CSV
               key = recent_obj["Key"]
               print(f"Processing MOST RECENT CSV => s3://{bucket_name}/{key}")
 
-              response = s3.get_object(Bucket=bucket_name, Key=key)
-              raw_data = response["Body"].read().decode("utf-8").splitlines()
+              resp = s3.get_object(Bucket=bucket_name, Key=key)
+              raw_data = resp["Body"].read().decode("utf-8").splitlines()
 
               # Skip first 8 lines
-              data_without_headers = raw_data[8:]  
+              data_without_headers = raw_data[8:]
 
               # Prepare a CSV DictReader using semicolon delimiter
               reader = csv.DictReader(data_without_headers, delimiter=';')
 
-              # Define columns we care about
+              # Define the columns we care about
               wanted_columns = [
                   "IP",
                   "DNS",
@@ -190,7 +145,7 @@ Resources:
                   "Category"
               ]
 
-              # We'll write two in-memory CSV buffers
+              # Prepare two in-memory CSVs
               pci_output = io.StringIO()
               nonpci_output = io.StringIO()
 
@@ -201,31 +156,30 @@ Resources:
               pci_writer.writeheader()
               nonpci_writer.writeheader()
 
-              # Process each row, pick needed columns, classify PCI or non-PCI
+              # Process each row, keep needed columns, check PCI Vuln
               for row in reader:
                   filtered_row = {}
                   for col in wanted_columns:
                       filtered_row[col] = row.get(col, "").strip()
 
-                  # Check PCI Vuln
                   pci_value = filtered_row["PCI Vuln"].lower()
                   if pci_value == "yes":
                       pci_writer.writerow(filtered_row)
                   else:
                       nonpci_writer.writerow(filtered_row)
 
-              # Convert to bytes
+              # Convert in-memory CSV to bytes
               pci_bytes = pci_output.getvalue().encode("utf-8")
               nonpci_bytes = nonpci_output.getvalue().encode("utf-8")
 
-              # Unique file names
+              # Build unique filenames
               timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
               random_str = uuid.uuid4().hex[:8]
 
               pci_output_key = f"output-processed/pci/{timestamp}-{random_str}-pci.csv"
               nonpci_output_key = f"output-processed/non-pci/{timestamp}-{random_str}-non-pci.csv"
 
-              # Upload results
+              # Upload the results
               s3.put_object(
                   Bucket=bucket_name,
                   Key=pci_output_key,
@@ -243,14 +197,10 @@ Resources:
               return {"status": "Completed processing the most recent CSV"}
 
 Outputs:
-  BucketName:
-    Description: "S3 Bucket created for VM Analysis Project"
-    Value: !Ref VMAnalysisBucket
-
-  LambdaName:
-    Description: "Name of the Lambda function"
+  LambdaFunctionName:
+    Description: "Name of the CSV-processing Lambda function"
     Value: !Ref VMAnalysisLambda
 
-  LambdaArn:
-    Description: "ARN of the Lambda function"
+  LambdaFunctionArn:
+    Description: "ARN of the CSV-processing Lambda function"
     Value: !GetAtt VMAnalysisLambda.Arn
