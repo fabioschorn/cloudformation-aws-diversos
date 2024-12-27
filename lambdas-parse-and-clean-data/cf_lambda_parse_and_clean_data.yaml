@@ -37,13 +37,17 @@ Resources:
                   - s3:PutObject
                 Resource:
                 # If your bucket is named differently, update below:
-                  - "arn:aws:s3:::vm-analysis-project-poc02"
-                  - "arn:aws:s3:::vm-analysis-project-poc02/input-unprocessed/*"
-                  - "arn:aws:s3:::vm-analysis-project-poc02/output-processed/pci/*"
-                  - "arn:aws:s3:::vm-analysis-project-poc02/output-processed/non-pci/*"
-                  - "arn:aws:s3:::vm-analysis-project-poc02/output-processed/pci"
-                  - "arn:aws:s3:::vm-analysis-project-poc02/output-processed/non-pci"
-                  - "arn:aws:s3:::vm-analysis-project-poc02/output-processed"
+                - !Sub "arn:aws:s3:::vm-analysis-project-poc02"
+                - !Sub "arn:aws:s3:::vm-analysis-project-poc02/*"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                # This should be restricted to the specific CMKs in use:
+                Resource: '*'
 
   ##########################################################
   # 2) Main Lambda Function (Processing CSV)
