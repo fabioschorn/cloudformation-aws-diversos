@@ -140,6 +140,7 @@ Resources:
                   "QID",
                   "Title",
                   "Severity",
+                  "Port",
                   "CVE ID",
                   "Vendor Reference",
                   "Threat",
