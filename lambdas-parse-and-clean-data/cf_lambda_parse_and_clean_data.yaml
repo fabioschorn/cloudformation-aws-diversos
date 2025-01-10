@@ -36,9 +36,8 @@ Resources:
                   - s3:ListBucket
                   - s3:PutObject
                 Resource:
-                # If your bucket is named differently, update below:
-                - !Sub "arn:aws:s3:::vm-analysis-project-poc02"
-                - !Sub "arn:aws:s3:::vm-analysis-project-poc02/*"
+                  - !Sub "arn:aws:s3:::vm-analysis-project-poc02"
+                  - !Sub "arn:aws:s3:::vm-analysis-project-poc02/*"
               - Effect: Allow
                 Action:
                   - kms:Decrypt
@@ -46,7 +45,6 @@ Resources:
                   - kms:ReEncrypt*
                   - kms:GenerateDataKey*
                   - kms:DescribeKey
-                # This should be restricted to the specific CMKs in use:
                 Resource: '*'
 
   ##########################################################
@@ -200,6 +198,26 @@ Resources:
               print(f"Uploaded non-PCI -> s3://{bucket_name}/{nonpci_output_key}")
 
               return {"status": "Completed processing the most recent CSV"}
+
+  # 3) Lambda Permission for S3 to Invoke the Function (s3:ObjectCreated:*)
+  VMAnalysisLambdaS3InvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt VMAnalysisLambda.Arn
+      Principal: "s3.amazonaws.com"
+      SourceAccount: !Ref "AWS::AccountId"
+      SourceArn: !Sub "arn:aws:s3:::vm-analysis-project-poc02"
+
+  # 4) S3 Bucket Notification (trigger) for 'input-unprocessed/' prefix and .csv files (Manual config after deploy)
+  VMAnalysisLambdaS3Trigger:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: "vm-analysis-project-poc02"
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Function: !GetAtt VMAnalysisLambda.Arn
 
 Outputs:
   LambdaFunctionName:
