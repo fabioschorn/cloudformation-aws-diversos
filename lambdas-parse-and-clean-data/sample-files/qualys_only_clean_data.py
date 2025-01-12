@@ -36,6 +36,7 @@ def process_qualys_csv(input_file_path, output_file_path):
         for row in reader:
             ip = row.get('IP', '').strip()
             qid = row.get('QID', '').strip()
+            dns = row.get('DNS', '').strip()
             severity = row.get('Severity', '').strip()
             
             if not ip or not qid:
