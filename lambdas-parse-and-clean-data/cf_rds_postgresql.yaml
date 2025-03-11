@@ -4,12 +4,12 @@ Description: "Creates a PostgreSQL RDS Database configured for Dev/Test environm
 Parameters:
   DBName:
     Type: String
-    Default: devtestdb
+    Default: vulnerabilitydb
     Description: "The database name."
 
   DBUsername:
     Type: String
-    Default: devuser
+    Default: postgres
     Description: "Database admin username."
     AllowedPattern: "[a-zA-Z0-9]+"
     ConstraintDescription: "must be alphanumeric."
@@ -24,11 +24,16 @@ Parameters:
 
   DBInstanceClass:
     Type: String
-    Default: db.t3.micro
+    Default: db.c6gd.medium
     AllowedValues:
-      - db.t3.micro
-      - db.t3.small
-      - db.t3.medium
+      - db.c6gd.medium
+      - db.c6gd.large
+      - db.c6gd.xlarge
+      - db.c6gd.2xlarge
+      - db.c6gd.4xlarge
+      - db.c6gd.8xlarge
+      - db.c6gd.12xlarge
+      - db.c6gd.16xlarge
     Description: "RDS Instance Type suitable for Dev/Test environments."
 
   VpcId:
@@ -62,7 +67,7 @@ Resources:
     Properties:
       DBName: !Ref DBName
       Engine: postgres
-      EngineVersion: "16.4-R2" # Ensure this version is available in your region
+      EngineVersion: "17.2"
       DBInstanceClass: !Ref DBInstanceClass
       MasterUsername: !Ref DBUsername
       MasterUserPassword: !Ref DBPassword
