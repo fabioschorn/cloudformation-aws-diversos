@@ -1,15 +1,15 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Creates an RDS PostgreSQL Database for storing vulnerability management data."
+Description: "Creates a PostgreSQL RDS Database configured for Dev/Test environments."
 
 Parameters:
   DBName:
     Type: String
-    Default: vulnerabilitydb
+    Default: devtestdb
     Description: "The database name."
 
   DBUsername:
     Type: String
-    Default: adminuser
+    Default: devuser
     Description: "Database admin username."
     AllowedPattern: "[a-zA-Z0-9]+"
     ConstraintDescription: "must be alphanumeric."
@@ -18,7 +18,7 @@ Parameters:
     Type: String
     Description: "Database admin password (min 8 chars, at least one number)."
     NoEcho: true
-    MinLength: 8
+    MinLength: 12
     AllowedPattern: "(?=.*[0-9])(?=.*[a-zA-Z]).+"
     ConstraintDescription: "must have at least one number and one letter."
 
@@ -29,48 +29,53 @@ Parameters:
       - db.t3.micro
       - db.t3.small
       - db.t3.medium
-    Description: "RDS Instance Type."
+    Description: "RDS Instance Type suitable for Dev/Test environments."
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: "Select your VPC ID."
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: "Select at least two private subnets in the VPC."
 
 Resources:
-
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
       DBSubnetGroupDescription: "Subnet group for PostgreSQL RDS"
-      SubnetIds:
-        - subnet-xxxxxxxx # REPLACE WITH YOUR SUBNET-1 ID
-        - subnet-yyyyyyyy # REPLACE WITH YOUR SUBNET-2 ID
+      SubnetIds: !Ref SubnetIds
 
   DBInstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: "Allow PostgreSQL access from Lambda and authorized clients"
-      VpcId: vpc-xxxxxxxx # REPLACE WITH YOUR VPC ID
+      GroupDescription: "Allow PostgreSQL access from within the VPC"
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 5432
           ToPort: 5432
-          CidrIp: 0.0.0.0/0 # Later restrict this to your Lambda or specific IPs!
+          CidrIp: "10.0.0.0/16" # Adjust to your VPC CIDR block for security
 
   PostgreSQLRDSInstance:
     Type: AWS::RDS::DBInstance
     Properties:
       DBName: !Ref DBName
       Engine: postgres
-      EngineVersion: "15.4"
+      EngineVersion: "16.4-R2" # Ensure this version is available in your region
       DBInstanceClass: !Ref DBInstanceClass
       MasterUsername: !Ref DBUsername
       MasterUserPassword: !Ref DBPassword
       AllocatedStorage: 20
       StorageType: gp2
-      BackupRetentionPeriod: 3
-      MultiAZ: false
-      PubliclyAccessible: true # Consider making false if Lambda in VPC
+      BackupRetentionPeriod: 1 # Shorter retention for Dev/Test
+      MultiAZ: false # Single-AZ for Dev/Test environments
+      PubliclyAccessible: false
       StorageEncrypted: true
       VPCSecurityGroups:
         - !GetAtt DBInstanceSecurityGroup.GroupId
       DBSubnetGroupName: !Ref DBSubnetGroup
-      DeletionProtection: false # Enable if needed in production environments
+      DeletionProtection: false
 
 Outputs:
   PostgreSQLEndpoint:
